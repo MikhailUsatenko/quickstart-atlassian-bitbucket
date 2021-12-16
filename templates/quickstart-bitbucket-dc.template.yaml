@@ -44,6 +44,8 @@ Metadata:
           - DBPassword
           - DBStorage
           - DBStorageType
+          - DBAllowMajorVersionUpgrade
+          - DBMajorVersionUpgradeSwtich
       - Label:
           default: Bastion host utilization
         Parameters:
@@ -128,6 +130,10 @@ Metadata:
         default: Database storage type
       DBSnapshotId:
         default: Database snapshot ID to restore
+      DBAllowMajorVersionUpgrade:
+        default: Allow major database version upgrade
+      DBMajorVersionUpgradeSwtich:
+        default: DB Major version upgrade switch
       DeploymentAutomationRepository:
         default: Deployment Automation Git Repository URL
       DeploymentAutomationBranch:
@@ -459,6 +465,22 @@ Parameters:
     ConstraintDescription: Must be 'General Purpose (SSD)' or 'Provisioned IOPS'.
     Description: Database storage type.
     Type: String
+  DBAllowMajorVersionUpgrade:
+    Default: false
+    AllowedValues:
+      - true
+      - false
+    ConstraintDescription: Must be 'true' or 'false'.
+    Description: Allow major database version upgrade.
+    Type: String
+  DBMajorVersionUpgradeSwtich:
+    Default: Green
+    AllowedValues:
+      - Green
+      - Blue
+    ConstraintDescription: Must be 'Green' or 'Blue'.
+    Description: When updaing DB engine version, new DB parameter group needs to be created. Update this value (If 'Green' then 'Blue' or vice versa) to create new group.
+    Type: String
   ElasticSearchPassword:
     Description: "Password for the elasticsearch master user, the username will be 'bitbucket'. If no password is specified, Bitbucket will authenticate with the elasticsearch cluster using IAM request signing (not recommended)."
     Type: String
@@ -653,6 +675,8 @@ Conditions:
   UseBastionHost: !And
     - !Equals [!Ref BastionHostRequired, true]
     - !Condition KeyProvided
+  BlueDeployment: !Equals [!Ref DBMajorVersionUpgradeSwtich, "Blue"]
+  GreenDeployment: !Equals [!Ref DBMajorVersionUpgradeSwtich, "Green"]
 
 Mappings:
   AWSRegionArch2AMI:
@@ -1592,16 +1616,38 @@ Resources:
             - logs:CreateLogStream
             - logs:PutLogEvents
             Resource: !Sub "arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/*DBNameGenerator*"
+  DBParamGroupGreen:
+    Type: AWS::RDS::DBParameterGroup
+    Condition: GreenDeployment
+    Properties:
+      Description: "DB Parameter Group for security error logging"
+      Family: !Join [ "", [ "postgres", !Ref DBEngineVersion ] ]
+      Parameters:
+        # The following are recommended to assist security scanning.
+        log_statement: "ddl"
+        log_min_duration_statement: "15000"
+  DBParamGroupBlue:
+    Type: AWS::RDS::DBParameterGroup
+    Condition: BlueDeployment
+    Properties:
+      Description: "DB Parameter Group for security error logging"
+      Family: !Join [ "", [ "postgres", !Ref DBEngineVersion ] ]
+      Parameters:
+        # The following are recommended to assist security scanning.
+        log_statement: "ddl"
+        log_min_duration_statement: "15000"
   DB:
     Type: AWS::RDS::DBInstance
     Condition: DBEnginePostgres
     Properties:
+      AllowMajorVersionUpgrade: !Ref DBAllowMajorVersionUpgrade
       AllocatedStorage: !Ref DBStorage
       DBInstanceClass: !Ref DBInstanceClass
       DBInstanceIdentifier: !GetAtt DbInstanceName.DBInstanceName
       DBName: !If [RestoreRDSOrStandby, !Ref "AWS::NoValue", bitbucket]
       DBSnapshotIdentifier: !If [RestoreFromRDSSnapshot, !Ref DBSnapshotId, !Ref "AWS::NoValue"]
       DBSubnetGroupName: !Ref DBSubnetGroup
+      DBParameterGroupName: !If [GreenDeployment, !Ref DBParamGroupGreen, !Ref DBParamGroupBlue]
       Engine: postgres
       EngineVersion: !Ref DBEngineVersion
       Iops: !If [DBProvisionedIops, !Ref DBIops, !Ref "AWS::NoValue"]
@@ -1641,6 +1687,8 @@ Resources:
         DBMultiAZ: !Ref DBMultiAZ
         DBSecurityGroup: !Ref SecurityGroup
         DBStorageType: !Ref DBStorageType
+        DBAllowMajorVersionUpgrade: !Ref DBAllowMajorVersionUpgrade
+        DBMajorVersionUpgradeSwtich: !Ref DBMajorVersionUpgradeSwtich
         ExportPrefix: !Ref ExportPrefix
         QSS3BucketName: !Ref QSS3BucketName
         QSS3KeyPrefix: !Ref QSS3KeyPrefix

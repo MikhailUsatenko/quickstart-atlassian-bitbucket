@@ -44,6 +44,8 @@ Metadata:
           - DBPassword
           - DBStorage
           - DBStorageType
+          - DBAllowMajorVersionUpgrade
+          - DBMajorVersionUpgradeSwtich
       - Label:
           default: Bastion host provisioning
         Parameters:
@@ -136,6 +138,10 @@ Metadata:
         default: Database storage
       DBStorageType:
         default: Database storage type
+      DBAllowMajorVersionUpgrade:
+        default: Allow major database version upgrade
+      DBMajorVersionUpgradeSwtich:
+        default: DB Major version upgrade switch
       DBSnapshotId:
         default: Database snapshot ID to restore
       DeploymentAutomationRepository:
@@ -485,6 +491,22 @@ Parameters:
     ConstraintDescription: Must be 'General Purpose (SSD)' or 'Provisioned IOPS'.
     Description: Database storage type.
     Type: String
+  DBAllowMajorVersionUpgrade:
+    Default: false
+    AllowedValues:
+      - true
+      - false
+    ConstraintDescription: Must be 'true' or 'false'.
+    Description: Allow major database version upgrade.
+    Type: String
+  DBMajorVersionUpgradeSwtich:
+    Default: Green
+    AllowedValues:
+      - Green
+      - Blue
+    ConstraintDescription: Must be 'Green' or 'Blue'.
+    Description: When updaing DB engine version, new DB parameter group needs to be created. Update this value (If 'Green' then 'Blue' or vice versa) to create new group.
+    Type: String
   ElasticSearchPassword:
     Description: "Password for the elasticsearch master user, the username will be 'bitbucket'. If no password is specified, Bitbucket will authenticate with the elasticsearch cluster using IAM request signing (not recommended)."
     Type: String
@@ -714,6 +736,8 @@ Resources:
         DBSnapshotId: !Ref 'DBSnapshotId'
         DBStorage: !Ref 'DBStorage'
         DBStorageType: !Ref 'DBStorageType'
+        DBAllowMajorVersionUpgrade: !Ref DBAllowMajorVersionUpgrade
+        DBMajorVersionUpgradeSwtich: !Ref DBMajorVersionUpgradeSwtich
         DeploymentAutomationRepository: !Ref 'DeploymentAutomationRepository'
         DeploymentAutomationBranch: !Ref 'DeploymentAutomationBranch'
         DeploymentAutomationPlaybook: !Ref 'DeploymentAutomationPlaybook'
