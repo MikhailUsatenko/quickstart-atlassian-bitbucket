@@ -925,7 +925,7 @@ Resources:
       LaunchConfigurationName: !Ref ClusterNodeLaunchConfig
       MinSize: !If [StandbyMode, '0', !Ref ClusterNodeMin]
       MaxSize: !Ref ClusterNodeMax
-      LoadBalancerNames: [!Ref LoadBalancer]
+      TargetGroupARNs: [!Ref MainTargetGroup, !Ref TcpTargetGroup]
       VPCZoneIdentifier:
         - !Select
           - 0
@@ -941,10 +941,10 @@ Resources:
           PropagateAtLaunch: true
         # NOTE: The leading COMMIT/TIMESTAMP are used to locate the position to update; see scripts/update-tags.py
         - Key: "atl:quickstart:commit-id"
-          Value: "COMMIT: 1ab73837b650a79665ca974ceb37e4088eee21b2"
+          Value: "COMMIT: bdb8a6813c9921f4952881eed4851f1fec2f7b46"
           PropagateAtLaunch: true
         - Key: "atl:quickstart:timestamp"
-          Value: "TIMESTAMP: 2021-11-25T07:12:04Z"
+          Value: "TIMESTAMP: 2022-04-06T19:16:45Z"
           PropagateAtLaunch: true
   ClusterNodeLaunchConfig:
     Type: AWS::AutoScaling::LaunchConfiguration
@@ -1644,54 +1644,185 @@ Resources:
         ExportPrefix: !Ref ExportPrefix
         QSS3BucketName: !Ref QSS3BucketName
         QSS3KeyPrefix: !Ref QSS3KeyPrefix
+  # NLB, convention to name faced load balancer with jira/confluence/crowd/bitbucket
   LoadBalancer:
-    Type: AWS::ElasticLoadBalancing::LoadBalancer
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
-      AppCookieStickinessPolicy:
-        - CookieName: BITBUCKETSESSIONID
-          PolicyName: SessionStickiness
-      ConnectionDrainingPolicy:
-        Enabled: true
-        Timeout: 300
-      ConnectionSettings:
-        IdleTimeout: 3600
-      CrossZone: true
-      Listeners:
-        - LoadBalancerPort: '80'
-          Protocol: HTTP
-          InstancePort: !If [DoSSL, '7991', '7990']
-          InstanceProtocol: HTTP
-          PolicyNames: [SessionStickiness]
-        - !If
-          - DoSSL
-          - LoadBalancerPort: '443'
-            Protocol: HTTPS
-            InstancePort: '7990'
-            InstanceProtocol: HTTP
-            PolicyNames:
-              - SessionStickiness
-            SSLCertificateId: !Ref SSLCertificateARN
-          - !Ref AWS::NoValue
-        - LoadBalancerPort: '7999'
-          Protocol: TCP
-          InstancePort: '7999'
-          InstanceProtocol: TCP
-      HealthCheck:
-        HealthyThreshold: '2'
-        Interval: '60'
-        Target: HTTP:7990/status
-        Timeout: '29'
-        UnhealthyThreshold: '2'
+      Type: 'network'
       Scheme: !If [UsePublicIp, 'internet-facing', 'internal']
+      Subnets: !Split [",", Fn::ImportValue: !Sub "${ExportPrefix}PubNets"]
+      Tags:
+        - Key: Name
+          Value: !Sub ["${StackName}-NetworkLoadBalancer", StackName: !Ref 'AWS::StackName']
+        - Key: Cluster
+          Value: !Ref AWS::StackName
+  # 80 HTTP -> ALB HTTP 80
+  NetworkLoadBalancerHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: TCP
+  # 443 HTTPS -> ALB HTTPS 443
+  NetworkLoadBalancerHTTPSListener:
+    Condition: DoSSL
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: TCP
+  # 7999 TCP -> TcpTargetGroup 7999
+  NetworkLoadBalancerTCPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TcpTargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 7999
+      Protocol: TCP
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Protocol: TCP
+      Port: !If [DoSSL, '443', '80'] # there're multiple listeners on the ALB, but we redirect only one that depends on SSL
+      VpcId:
+        Fn::ImportValue: !Sub "${ExportPrefix}VPCID"
+      TargetType: alb
+      Targets:
+        - Id: !Ref ApplicationLoadBalancer
+          Port: !If [DoSSL, '443', '80'] # there're multiple listeners on the ALB, but we redirect only one that depends on SSL
+      Tags:
+        - Key: Name
+          Value: ALBTargetGroup
+        - Key: Cluster
+          Value: !Ref AWS::StackName
+        - Key: DependsOnConditionalResourse
+          Value: !If [DoSSL, !GetAtt ApplicationLoadBalancerHTTPSListener.ListenerArn, Ignored]
+        # NOTE: The leading COMMIT/TIMESTAMP are used to locate the position to update; see scripts/update-tags.py
+        - Key: "atl:quickstart:commit-id"
+          Value: "COMMIT: bdb8a6813c9921f4952881eed4851f1fec2f7b46"
+        - Key: "atl:quickstart:timestamp"
+          Value: "TIMESTAMP: 2022-04-06T19:16:45Z"
+    DependsOn:
+      - ApplicationLoadBalancerHTTPListener
+  TcpTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 7999
+      Protocol: TCP
+      VpcId:
+        Fn::ImportValue: !Sub "${ExportPrefix}VPCID"
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: '300'
+      Tags:
+        - Key: Name
+          Value: TcpTargetGroup
+        - Key: Cluster
+          Value: !Ref AWS::StackName
+        # NOTE: The leading COMMIT/TIMESTAMP are used to locate the position to update; see scripts/update-tags.py
+        - Key: "atl:quickstart:commit-id"
+          Value: "COMMIT: bdb8a6813c9921f4952881eed4851f1fec2f7b46"
+        - Key: "atl:quickstart:timestamp"
+          Value: "TIMESTAMP: 2022-04-06T19:16:45Z"
+  # ALB
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      LoadBalancerAttributes:
+        - Key: idle_timeout.timeout_seconds
+          Value: '3600'
+      Scheme: 'internal'
       SecurityGroups: [!Ref SecurityGroup]
       Subnets: !Split
         - ","
         - Fn::ImportValue: !Sub "${ExportPrefix}PubNets"
       Tags:
         - Key: Name
-          Value: !Sub "${AWS::StackName} LoadBalancer"
+          Value: !Sub ["${StackName}-LoadBalancer", StackName: !Ref 'AWS::StackName']
         - Key: Cluster
           Value: !Ref AWS::StackName
+        # NOTE: The leading COMMIT/TIMESTAMP are used to locate the position to update; see scripts/update-tags.py
+        - Key: "atl:quickstart:commit-id"
+          Value: "COMMIT: bdb8a6813c9921f4952881eed4851f1fec2f7b46"
+        - Key: "atl:quickstart:timestamp"
+          Value: "TIMESTAMP: 2022-04-06T19:16:45Z"
+  # 80 HTTP -> MainTargetGroup 7990
+  ApplicationLoadBalancerHTTPListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - !If
+          - DoSSL
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: '443'
+              Host: '#{host}'
+              Path: '/#{path}'
+              Query: '#{query}'
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref MainTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+  # 443 HTTPS -> MainTargetGroup 7990
+  ApplicationLoadBalancerHTTPSListener:
+    Condition: DoSSL
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      Certificates:
+        - CertificateArn: !Ref SSLCertificateARN
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref MainTargetGroup
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 443
+      Protocol: HTTPS
+  MainTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Port: 7990
+      Protocol: HTTP
+      VpcId:
+        Fn::ImportValue: !Sub "${ExportPrefix}VPCID"
+      HealthCheckIntervalSeconds: 60
+      HealthCheckTimeoutSeconds: 29
+      HealthyThresholdCount: 2
+      Matcher:
+        HttpCode: '200'
+      HealthCheckPath: '/status'
+      HealthCheckPort: 7990
+      HealthCheckProtocol: HTTP
+      TargetGroupAttributes:
+        - Key: stickiness.enabled
+          Value: 'true'
+        - Key: stickiness.type
+          Value: app_cookie
+        - Key: stickiness.app_cookie.cookie_name
+          Value: BITBUCKETSESSIONID
+        - Key: deregistration_delay.timeout_seconds
+          Value: '300'
+      Tags:
+        - Key: Name
+          Value: MainTargetGroup
+        - Key: Cluster
+          Value: !Ref AWS::StackName
+        # NOTE: The leading COMMIT/TIMESTAMP are used to locate the position to update; see scripts/update-tags.py
+        - Key: "atl:quickstart:commit-id"
+          Value: "COMMIT: bdb8a6813c9921f4952881eed4851f1fec2f7b46"
+        - Key: "atl:quickstart:timestamp"
+          Value: "TIMESTAMP: 2022-04-06T19:16:45Z"
+    DependsOn:
+      - ApplicationLoadBalancer
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -1758,7 +1889,12 @@ Resources:
                 Fn::ImportValue: !Sub '${ExportPrefix}NAT2EIP'
       Tags:
         - Key: Name
-          Value: !Join [' ', [!Ref 'AWS::StackName', sg]]
+          Value: !Join [' ', [!Ref 'AWS::StackName', 'sg']]
+        # NOTE: The leading COMMIT/TIMESTAMP are used to locate the position to update; see scripts/update-tags.py
+        - Key: "atl:quickstart:commit-id"
+          Value: "COMMIT: bdb8a6813c9921f4952881eed4851f1fec2f7b46"
+        - Key: "atl:quickstart:timestamp"
+          Value: "TIMESTAMP: 2022-04-06T19:16:45Z"
       VpcId:
         Fn::ImportValue: !Sub "${ExportPrefix}VPCID"
   SecurityGroupIngress:
